@@ -2,6 +2,7 @@ require 'spec_helper'
 require 'byebug'
 
 describe IgnorableColumns do
+
   class TestModel < ActiveRecord::Base
     unless table_exists?
       connection.create_table :test_models do |t|
@@ -30,25 +31,50 @@ describe IgnorableColumns do
   class SubclassTestModel < TestModel
   end
 
+  def clear_model_definitions_and_subclasses(model)
+    Object.send(:remove_const, model.name)
+    subclass_names = Object.constants.map(&:to_s).reject { |c| !c.match("#{model.name}With") }
+    subclass_names.each do |subclass_name|
+      Object.send(:remove_const, subclass_name)
+    end
+  end
+
   around :each do |example|
     ActiveRecord::Base.transaction do
       example.call
       raise ActiveRecord::Rollback
     end
+
+    # Reconstruct the classes so that they reset
+    clear_model_definitions_and_subclasses(TestModel)
+    clear_model_definitions_and_subclasses(Thing)
+    clear_model_definitions_and_subclasses(SubclassTestModel)
+
+    Object.const_set("TestModel", Class.new(ActiveRecord::Base) do
+      self.table_name = 'test_models'
+      has_many :things
+    end)
+    Object.const_set("Thing", Class.new(ActiveRecord::Base) do
+      self.table_name = 'things'
+      belongs_to :test_model
+    end)
+    Object.const_set("SubclassTestModel", Class.new(TestModel))
   end
 
   let(:test_model) do
     Object.const_set("TestModel_#{(Time.now.to_f * 10**6).to_i}", Class.new(ActiveRecord::Base) do
       self.table_name = 'test_models'
+      has_many :things
     end)
-  end
-  let(:sub_test_model) do
-    Object.const_set("SubTestModel_#{(Time.now.to_f * 10**6).to_i}", Class.new(test_model))
   end
   let(:thing) do
     Object.const_set("Thing_#{(Time.now.to_f * 10**6).to_i}", Class.new(ActiveRecord::Base) do
       self.table_name = 'things'
+      belongs_to :test_model
     end)
+  end
+  let(:sub_test_model) do
+    Object.const_set("SubTestModel_#{(Time.now.to_f * 10**6).to_i}", Class.new(test_model))
   end
 
   describe '#ignore_columns_in_sql' do
@@ -60,7 +86,7 @@ describe IgnorableColumns do
         TestModel.ignore_columns_in_sql
       end
 
-      it 'should query all columns' do
+      it 'should not query all columns' do
         expect { test_model.all }.to include_col_in_sql(:test_models, :name)
         expect { test_model.all }.to include_col_in_sql(:test_models, :some_attributes)
         expect { test_model.all }.to include_col_in_sql(:test_models, :legacy)
@@ -82,7 +108,7 @@ describe IgnorableColumns do
         TestModel.ignore_columns_in_sql
       end
 
-      it 'should query all columns' do
+      it 'should not query all columns' do
         expect { test_model.all }.not_to include_col_in_sql(:test_models, :name)
         expect { test_model.all }.not_to include_col_in_sql(:test_models, :some_attributes)
         expect { test_model.all }.to include_col_in_sql(:test_models, :legacy)
@@ -101,7 +127,7 @@ describe IgnorableColumns do
         test_model.ignore_columns_in_sql
       end
 
-      it 'should query all columns' do
+      it 'should not query all columns' do
         expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :name)
         expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :some_attributes)
         expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :legacy)
@@ -114,7 +140,126 @@ describe IgnorableColumns do
         test_model.ignore_columns_in_sql
       end
 
-      it 'should query all columns' do
+      it 'should not query all columns' do
+        expect { test_model.including_ignored_columns(:name).all }.to include_col_in_sql(:test_models, :name)
+        expect { test_model.including_ignored_columns(:name).all }.not_to include_col_in_sql(:test_models, :some_attributes)
+        expect { test_model.including_ignored_columns(:name).all }.to include_col_in_sql(:test_models, :legacy)
+      end
+    end
+  end
+
+  describe '#ignore_columns_preload_all_subclass' do
+    context 'when without including_ignored_columns and without ignore_columns' do
+      before do
+        test_model.ignore_columns
+        test_model.ignore_columns_in_sql
+        test_model.ignore_columns_preload_all_subclass
+        TestModel.ignorable_columns = []
+        TestModel.ignore_columns_in_sql
+        TestModel.ignore_columns_preload_all_subclass
+      end
+
+      it 'should not preload subclasses' do
+        expect('Thing'.constantize).to eq Thing
+        expect('SubclassTestModel'.constantize).to eq SubclassTestModel
+        expect('TestModel'.constantize).to eq TestModel
+        expect { 'TestModelWithName'.constantize }.to raise_error(Exception)
+        expect { 'TestModelWithSomeAttributes'.constantize }.to raise_error(Exception)
+        expect { 'TestModelWithNameSomeAttributes'.constantize }.to raise_error(Exception)
+      end
+
+      it 'should not query all columns' do
+        expect { test_model.all }.to include_col_in_sql(:test_models, :name)
+        expect { test_model.all }.to include_col_in_sql(:test_models, :some_attributes)
+        expect { test_model.all }.to include_col_in_sql(:test_models, :legacy)
+        expect { TestModel.includes(:things) }.to include_col_in_sql(:test_models, :name)
+        expect { TestModel.includes(:things) }.to include_col_in_sql(:test_models, :some_attributes)
+        expect { TestModel.includes(:things) }.to include_col_in_sql(:test_models, :legacy)
+        expect { TestModel.eager_load(:things) }.to include_col_in_sql(:test_models, :name)
+        expect { TestModel.eager_load(:things) }.to include_col_in_sql(:test_models, :some_attributes)
+        expect { TestModel.eager_load(:things) }.to include_col_in_sql(:test_models, :legacy)
+      end
+    end
+
+    context 'when without including_ignored_columns and with ignore_columns' do
+      before do
+        test_model.ignore_columns :name, :some_attributes
+        test_model.ignore_columns_in_sql
+        test_model.ignore_columns_preload_all_subclass
+        TestModel.ignorable_columns = []
+        TestModel.ignore_columns :name, :some_attributes
+        TestModel.ignore_columns_in_sql
+        TestModel.ignore_columns_preload_all_subclass
+      end
+
+      it 'should preload subclasses' do
+        expect('Thing'.constantize).to eq Thing
+        expect('SubclassTestModel'.constantize).to eq SubclassTestModel
+        expect('TestModel'.constantize).to eq TestModel
+        expect('TestModelWithName'.constantize).to eq TestModelWithName
+        expect('TestModelWithSomeAttributes'.constantize).to eq TestModelWithSomeAttributes
+        expect('TestModelWithNameSomeAttributes'.constantize).to eq TestModelWithNameSomeAttributes
+      end
+
+      it 'should not query all columns' do
+        expect { test_model.all }.not_to include_col_in_sql(:test_models, :name)
+        expect { test_model.all }.not_to include_col_in_sql(:test_models, :some_attributes)
+        expect { test_model.all }.to include_col_in_sql(:test_models, :legacy)
+        expect { TestModel.includes(:things) }.not_to include_col_in_sql(:test_models, :name)
+        expect { TestModel.includes(:things) }.not_to include_col_in_sql(:test_models, :some_attributes)
+        expect { TestModel.includes(:things) }.to include_col_in_sql(:test_models, :legacy)
+        expect { TestModel.eager_load(:things) }.not_to include_col_in_sql(:test_models, :name)
+        expect { TestModel.eager_load(:things) }.not_to include_col_in_sql(:test_models, :some_attributes)
+        expect { TestModel.eager_load(:things) }.to include_col_in_sql(:test_models, :legacy)
+      end
+    end
+
+    context 'when with all including_ignored_columns' do
+      before do
+        test_model.ignore_columns :name, :some_attributes
+        test_model.ignore_columns_in_sql
+        test_model.ignore_columns_preload_all_subclass
+        @test_model_class_name = test_model.name
+        @thing_class_name = thing.name
+        @sub_test_model_class_name = sub_test_model.name
+      end
+
+      it 'should preload subclasses' do
+        expect{ "#{@thing_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@sub_test_model_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithName".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithSomeAttributes".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithNameSomeAttributes".constantize }.to_not raise_error(Exception)
+      end
+
+      it 'should not query all columns' do
+        expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :name)
+        expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :some_attributes)
+        expect { test_model.including_ignored_columns.all }.to include_col_in_sql(:test_models, :legacy)
+      end
+    end
+
+    context 'when with some including_ignored_columns' do
+      before do
+        test_model.ignore_columns :name, :some_attributes
+        test_model.ignore_columns_in_sql
+        test_model.ignore_columns_preload_all_subclass
+        @test_model_class_name = test_model.name
+        @thing_class_name = thing.name
+        @sub_test_model_class_name = test_model.name
+      end
+
+      it 'should preload subclasses' do
+        expect{ "#{@thing_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@sub_test_model_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithName".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithSomeAttributes".constantize }.to_not raise_error(Exception)
+        expect{ "#{@test_model_class_name}WithNameSomeAttributes".constantize }.to_not raise_error(Exception)
+      end
+
+      it 'should not query all columns' do
         expect { test_model.including_ignored_columns(:name).all }.to include_col_in_sql(:test_models, :name)
         expect { test_model.including_ignored_columns(:name).all }.not_to include_col_in_sql(:test_models, :some_attributes)
         expect { test_model.including_ignored_columns(:name).all }.to include_col_in_sql(:test_models, :legacy)

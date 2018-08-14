@@ -57,6 +57,28 @@ module IgnorableColumns
     end
     alias ignore_column_in_sql ignore_columns_in_sql
 
+    # Preloads all combination of subclasses.
+    # i.e TopicWithAttributes, TopicWithClass, TopicWithAttributesClass
+    # NOTE: should be called after #ignore_columns_in_sql
+    #
+    #   class Topic < ActiveRecord::Base
+    #     ignore_columns :attributes, :class
+    #     ignore_columns_in_sql
+    #     ignore_columns_preload_all_subclass
+    #   end
+    def ignore_columns_preload_all_subclass
+      (1..self.ignorable_columns.size).each do |n|
+        combination_of_cols = self.ignorable_columns.combination(n).to_a
+        for combination_of_col in combination_of_cols
+          st_cols = combination_of_col.map(&:to_s)
+          sy_cols = combination_of_col.map(&:to_sym)
+          next if including_columns_subclass_cache[sy_cols].present?
+          subclass_name = including_ignored_columns_subclass_name(st_cols)
+          including_columns_subclass_cache[sy_cols] = generate_subclass_for_ignored_cols(subclass_name, st_cols)
+        end
+      end
+    end
+
     # Has a column been ignored?
     # Accepts both ActiveRecord::ConnectionAdapter::Column objects,
     # and actual column names ('title')
